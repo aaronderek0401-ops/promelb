@@ -145,7 +145,7 @@ private struct GalaxyPreview: View {
                 y: center.y + sin(angle) * distance
             )
             let tangent = CGVector(dx: -sin(angle), dy: cos(angle))
-            let speed = 24 + Double(index) * 8
+            let speed = 42 + Double(index) * 6
 
             return OrbitalBody(
                 id: index,
@@ -176,9 +176,9 @@ private struct GalaxyPreview: View {
 
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         var accelerations = Array(repeating: CGVector.zero, count: bodies.count)
-        let gravity = 175.0
-        let softening = 1600.0
-        let closeRepulsion = 1450.0
+        let gravity = 360.0
+        let softening = 2600.0
+        let closeRepulsion = 520.0
 
         for i in bodies.indices {
             for j in bodies.indices where i != j {
@@ -186,9 +186,8 @@ private struct GalaxyPreview: View {
                 let dy = bodies[j].position.y - bodies[i].position.y
                 let distanceSquared = dx * dx + dy * dy + softening
                 let distance = sqrt(distanceSquared)
-                let minDistance = (bodies[i].radius + bodies[j].radius) * 0.86
-                let pullScale = distance < minDistance * 1.4 ? 0.25 : 1.0
-                let force = gravity * bodies[j].mass / distanceSquared * pullScale
+                let minDistance = (bodies[i].radius + bodies[j].radius) * 0.76
+                let force = gravity * bodies[j].mass / distanceSquared
 
                 accelerations[i].dx += dx / distance * force
                 accelerations[i].dy += dy / distance * force
@@ -205,28 +204,28 @@ private struct GalaxyPreview: View {
             let centerDy = center.y - bodies[i].position.y
             let centerDistance = max(1, hypot(centerDx, centerDy))
             let orbitalDirection = CGVector(dx: -centerDy / centerDistance, dy: centerDx / centerDistance)
-            accelerations[i].dx += centerDx * 0.045 + orbitalDirection.dx * 13
-            accelerations[i].dy += centerDy * 0.045 + orbitalDirection.dy * 13
+            accelerations[i].dx += centerDx * 0.020 + orbitalDirection.dx * 5
+            accelerations[i].dy += centerDy * 0.020 + orbitalDirection.dy * 5
         }
 
         for index in bodies.indices {
             bodies[index].velocity.dx += accelerations[index].dx * deltaTime
             bodies[index].velocity.dy += accelerations[index].dy * deltaTime
 
-            bodies[index].velocity.dx *= 0.999
-            bodies[index].velocity.dy *= 0.999
+            bodies[index].velocity.dx *= 0.9995
+            bodies[index].velocity.dy *= 0.9995
 
-            let minSpeed = 18.0
+            let minSpeed = 34.0
             let currentSpeed = hypot(bodies[index].velocity.dx, bodies[index].velocity.dy)
             if currentSpeed < minSpeed {
                 let dx = bodies[index].position.x - center.x
                 let dy = bodies[index].position.y - center.y
                 let distance = max(1, hypot(dx, dy))
-                bodies[index].velocity.dx += -dy / distance * 10 * deltaTime
-                bodies[index].velocity.dy += dx / distance * 10 * deltaTime
+                bodies[index].velocity.dx += -dy / distance * 24 * deltaTime
+                bodies[index].velocity.dy += dx / distance * 24 * deltaTime
             }
 
-            let maxSpeed = 150.0
+            let maxSpeed = 190.0
             let speed = hypot(bodies[index].velocity.dx, bodies[index].velocity.dy)
             if speed > maxSpeed {
                 bodies[index].velocity.dx = bodies[index].velocity.dx / speed * maxSpeed
@@ -264,7 +263,7 @@ private struct GalaxyPreview: View {
                     distance = 1
                 }
 
-                let minDistance = (bodies[i].radius + bodies[j].radius) * 0.92
+                let minDistance = (bodies[i].radius + bodies[j].radius) * 0.82
                 guard distance < minDistance else { continue }
 
                 let normalX = dx / distance
@@ -284,12 +283,20 @@ private struct GalaxyPreview: View {
                 let separatingVelocity = relativeVelocityX * normalX + relativeVelocityY * normalY
 
                 if separatingVelocity < 0 {
-                    let bounce = 0.72
+                    let bounce = 0.18
                     let impulse = -(1 + bounce) * separatingVelocity / (1 / bodies[i].mass + 1 / bodies[j].mass)
                     bodies[i].velocity.dx -= impulse * normalX / bodies[i].mass
                     bodies[i].velocity.dy -= impulse * normalY / bodies[i].mass
                     bodies[j].velocity.dx += impulse * normalX / bodies[j].mass
                     bodies[j].velocity.dy += impulse * normalY / bodies[j].mass
+
+                    let tangentX = -normalY
+                    let tangentY = normalX
+                    let swirl = 7.0
+                    bodies[i].velocity.dx -= tangentX * swirl * jShare
+                    bodies[i].velocity.dy -= tangentY * swirl * jShare
+                    bodies[j].velocity.dx += tangentX * swirl * iShare
+                    bodies[j].velocity.dy += tangentY * swirl * iShare
                 }
 
                 keepBody(i, inside: size)
@@ -299,22 +306,27 @@ private struct GalaxyPreview: View {
     }
 
     private func keepBody(_ index: Int, inside size: CGSize) {
-        let padding = bodies[index].radius * 0.8
+        let padding = bodies[index].radius * 0.72
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
 
         if bodies[index].position.x < padding {
             bodies[index].position.x = padding
-            bodies[index].velocity.dx = abs(bodies[index].velocity.dx) * 0.78
+            bodies[index].velocity.dx = abs(bodies[index].velocity.dx) * 0.22
+            bodies[index].velocity.dy += (center.y - bodies[index].position.y) * 0.025
         } else if bodies[index].position.x > size.width - padding {
             bodies[index].position.x = size.width - padding
-            bodies[index].velocity.dx = -abs(bodies[index].velocity.dx) * 0.78
+            bodies[index].velocity.dx = -abs(bodies[index].velocity.dx) * 0.22
+            bodies[index].velocity.dy += (center.y - bodies[index].position.y) * 0.025
         }
 
         if bodies[index].position.y < padding {
             bodies[index].position.y = padding
-            bodies[index].velocity.dy = abs(bodies[index].velocity.dy) * 0.78
+            bodies[index].velocity.dy = abs(bodies[index].velocity.dy) * 0.22
+            bodies[index].velocity.dx += (center.x - bodies[index].position.x) * 0.025
         } else if bodies[index].position.y > size.height - padding {
             bodies[index].position.y = size.height - padding
-            bodies[index].velocity.dy = -abs(bodies[index].velocity.dy) * 0.78
+            bodies[index].velocity.dy = -abs(bodies[index].velocity.dy) * 0.22
+            bodies[index].velocity.dx += (center.x - bodies[index].position.x) * 0.025
         }
     }
 
