@@ -101,10 +101,10 @@ private struct GalaxyPreview: View {
         TimelineView(.animation) { timeline in
             Canvas { context, size in
                 let rect = CGRect(origin: .zero, size: size)
-                drawBackground(in: rect, context: context)
-
                 let updatedBodies = updateBodies(for: timeline.date, in: size)
                 let view = cameraView(for: updatedBodies, in: size)
+
+                drawBackground(in: rect, view: view, size: size, context: context)
                 drawOrbits(for: updatedBodies, view: view, size: size, in: &context)
                 drawWaves(waves, time: timeline.date.timeIntervalSinceReferenceDate, view: view, size: size, in: &context)
                 drawBodies(updatedBodies, view: view, size: size, in: &context)
@@ -195,6 +195,13 @@ private struct GalaxyPreview: View {
         let springStrength = 1.05
         let repulsionStrength = 980.0
         let centerStrength = 0.018
+        let systemCenter = centerOfMass()
+        let systemDrift = averageVelocity()
+        let centerOffset = hypot(systemCenter.x, systemCenter.y)
+        let centerDeadZone = 42.0
+        let anchorPull = max(0, centerOffset - centerDeadZone) * 0.050
+        let anchorX = centerOffset > 0 ? -systemCenter.x / centerOffset * anchorPull : 0
+        let anchorY = centerOffset > 0 ? -systemCenter.y / centerOffset * anchorPull : 0
 
         for i in bodies.indices {
             for j in bodies.indices where i != j {
@@ -239,6 +246,8 @@ private struct GalaxyPreview: View {
             accelerations[i].dy += centerDy * centerStrength + orbitalDirection.dy * orbitBias
             accelerations[i].dx += cos(time * 0.31 + bodyPhase) * wander + cos(time * 0.13 + bodyPhase * 1.7) * wander * 0.7
             accelerations[i].dy += sin(time * 0.27 + bodyPhase * 1.3) * wander + sin(time * 0.11 + bodyPhase * 0.8) * wander * 0.7
+            accelerations[i].dx += anchorX
+            accelerations[i].dy += anchorY
         }
 
         for index in bodies.indices {
@@ -269,6 +278,8 @@ private struct GalaxyPreview: View {
             bodies[index].velocity.dx += accelerations[index].dx * deltaTime
             bodies[index].velocity.dy += accelerations[index].dy * deltaTime
 
+            bodies[index].velocity.dx -= systemDrift.dx * 0.010
+            bodies[index].velocity.dy -= systemDrift.dy * 0.010
             bodies[index].velocity.dx *= 0.9995
             bodies[index].velocity.dy *= 0.9995
 
@@ -303,6 +314,34 @@ private struct GalaxyPreview: View {
                 bodies[index].trail.removeFirst()
             }
         }
+    }
+
+    private func centerOfMass() -> CGPoint {
+        let totalMass = bodies.reduce(0) { $0 + $1.mass }
+        guard totalMass > 0 else { return .zero }
+
+        let weighted = bodies.reduce(CGPoint.zero) { partial, body in
+            CGPoint(
+                x: partial.x + body.position.x * body.mass,
+                y: partial.y + body.position.y * body.mass
+            )
+        }
+
+        return CGPoint(x: weighted.x / totalMass, y: weighted.y / totalMass)
+    }
+
+    private func averageVelocity() -> CGVector {
+        let totalMass = bodies.reduce(0) { $0 + $1.mass }
+        guard totalMass > 0 else { return .zero }
+
+        let weighted = bodies.reduce(CGVector.zero) { partial, body in
+            CGVector(
+                dx: partial.dx + body.velocity.dx * body.mass,
+                dy: partial.dy + body.velocity.dy * body.mass
+            )
+        }
+
+        return CGVector(dx: weighted.dx / totalMass, dy: weighted.dy / totalMass)
     }
 
     private func updateGravityWaves(time: TimeInterval) {
@@ -422,23 +461,67 @@ private struct GalaxyPreview: View {
             maxY = max(maxY, body.position.y + body.radius * 1.7)
         }
 
-        let width = max(220, maxX - minX)
-        let height = max(220, maxY - minY)
-        let targetCenter = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
-        let targetScale = min(size.width * 0.72 / width, size.height * 0.72 / height, 1.25)
-        let smoothed = GalaxyCamera(
-            center: CGPoint(
-                x: camera.center.x * 0.92 + targetCenter.x * 0.08,
-                y: camera.center.y * 0.92 + targetCenter.y * 0.08
-            ),
-            scale: camera.scale * 0.90 + targetScale * 0.10
-        )
+        let screenBounds = projectedBounds(minX: minX, maxX: maxX, minY: minY, maxY: maxY, view: camera, size: size)
+        let outerRect = rectWithInset(width: size.width, height: size.height, insetXRatio: 0.10, insetYRatio: 0.10)
+        let innerRect = rectWithInset(width: size.width, height: size.height, insetXRatio: 0.22, insetYRatio: 0.22)
 
-        DispatchQueue.main.async {
-            camera = smoothed
+        guard !outerRect.contains(screenBounds) else {
+            let compactEnough = innerRect.contains(screenBounds)
+            let targetScale = compactEnough ? min(1.04, camera.scale + 0.0008) : camera.scale
+            let resting = GalaxyCamera(center: camera.center, scale: targetScale)
+            updateCameraIfNeeded(resting)
+            return resting
         }
 
+        var targetCenter = camera.center
+        let leftOverflow = max(0, outerRect.minX - screenBounds.minX)
+        let rightOverflow = max(0, screenBounds.maxX - outerRect.maxX)
+        let topOverflow = max(0, outerRect.minY - screenBounds.minY)
+        let bottomOverflow = max(0, screenBounds.maxY - outerRect.maxY)
+        targetCenter.x += (rightOverflow - leftOverflow) / max(camera.scale, 0.001) * 0.55
+        targetCenter.y += (bottomOverflow - topOverflow) / max(camera.scale, 0.001) * 0.55
+
+        let width = max(260, maxX - minX)
+        let height = max(260, maxY - minY)
+        let requiredScale = min(size.width * 0.82 / width, size.height * 0.82 / height, camera.scale)
+        let smoothed = GalaxyCamera(
+            center: CGPoint(
+                x: camera.center.x * 0.985 + targetCenter.x * 0.015,
+                y: camera.center.y * 0.985 + targetCenter.y * 0.015
+            ),
+            scale: camera.scale * 0.992 + requiredScale * 0.008
+        )
+
+        updateCameraIfNeeded(smoothed)
         return smoothed
+    }
+
+    private func rectWithInset(width: Double, height: Double, insetXRatio: Double, insetYRatio: Double) -> CGRect {
+        let insetX = width * insetXRatio
+        let insetY = height * insetYRatio
+        return CGRect(x: insetX, y: insetY, width: width - insetX * 2, height: height - insetY * 2)
+    }
+
+    private func updateCameraIfNeeded(_ nextCamera: GalaxyCamera) {
+        let centerDelta = hypot(nextCamera.center.x - camera.center.x, nextCamera.center.y - camera.center.y)
+        let scaleDelta = abs(nextCamera.scale - camera.scale)
+        guard centerDelta > 0.35 || scaleDelta > 0.0015 else { return }
+
+        DispatchQueue.main.async {
+            camera = nextCamera
+        }
+    }
+
+    private func projectedBounds(minX: Double, maxX: Double, minY: Double, maxY: Double, view: GalaxyCamera, size: CGSize) -> CGRect {
+        let topLeft = screenPoint(CGPoint(x: minX, y: minY), view: view, size: size)
+        let bottomRight = screenPoint(CGPoint(x: maxX, y: maxY), view: view, size: size)
+
+        return CGRect(
+            x: min(topLeft.x, bottomRight.x),
+            y: min(topLeft.y, bottomRight.y),
+            width: abs(bottomRight.x - topLeft.x),
+            height: abs(bottomRight.y - topLeft.y)
+        )
     }
 
     private func screenPoint(_ point: CGPoint, view: GalaxyCamera, size: CGSize) -> CGPoint {
@@ -448,7 +531,7 @@ private struct GalaxyPreview: View {
         )
     }
 
-    private func drawBackground(in rect: CGRect, context: GraphicsContext) {
+    private func drawBackground(in rect: CGRect, view: GalaxyCamera, size: CGSize, context: GraphicsContext) {
         context.fill(
             Path(rect),
             with: .linearGradient(
@@ -462,11 +545,15 @@ private struct GalaxyPreview: View {
             )
         )
 
-        for index in 0..<48 {
-            let x = rect.width * pseudoRandom(index, salt: 11)
-            let y = rect.height * pseudoRandom(index, salt: 23)
+        for index in 0..<64 {
+            let worldX = -900 + pseudoRandom(index, salt: 11) * 1800
+            let worldY = -900 + pseudoRandom(index, salt: 23) * 1800
+            let x = size.width / 2 + (worldX - view.center.x * 0.28) * view.scale * 0.42
+            let y = size.height / 2 + (worldY - view.center.y * 0.28) * view.scale * 0.42
+            guard x > -10, x < rect.width + 10, y > -10, y < rect.height + 10 else { continue }
+
             let opacity = 0.12 + pseudoRandom(index, salt: 41) * 0.28
-            let radius = 0.6 + pseudoRandom(index, salt: 67) * 1.4
+            let radius = (0.6 + pseudoRandom(index, salt: 67) * 1.4) * max(0.82, min(1.18, view.scale))
             let starRect = CGRect(x: x, y: y, width: radius, height: radius)
             context.fill(Path(ellipseIn: starRect), with: .color(.white.opacity(opacity)))
         }
