@@ -94,6 +94,8 @@ private struct GalaxyPreview: View {
     @State private var bodies: [OrbitalBody] = []
     @State private var lastUpdate = Date()
     @State private var camera = GalaxyCamera(center: .zero, scale: 1)
+    @State private var waves: [GravityWave] = []
+    @State private var nextWaveTime: TimeInterval = 0
 
     var body: some View {
         TimelineView(.animation) { timeline in
@@ -104,6 +106,7 @@ private struct GalaxyPreview: View {
                 let updatedBodies = updateBodies(for: timeline.date, in: size)
                 let view = cameraView(for: updatedBodies, in: size)
                 drawOrbits(for: updatedBodies, view: view, size: size, in: &context)
+                drawWaves(waves, time: timeline.date.timeIntervalSinceReferenceDate, view: view, size: size, in: &context)
                 drawBodies(updatedBodies, view: view, size: size, in: &context)
             }
         }
@@ -129,7 +132,8 @@ private struct GalaxyPreview: View {
             }
 
             let elapsed = min(max(date.timeIntervalSince(lastUpdate), 1.0 / 120.0), 1.0 / 24.0)
-            stepSimulation(deltaTime: elapsed, in: size)
+            stepSimulation(deltaTime: elapsed, time: date.timeIntervalSinceReferenceDate, in: size)
+            updateGravityWaves(time: date.timeIntervalSinceReferenceDate)
             lastUpdate = date
         }
 
@@ -139,20 +143,31 @@ private struct GalaxyPreview: View {
     private func resetBodies(in size: CGSize) {
         lastUpdate = .now
         camera = GalaxyCamera(center: .zero, scale: 1)
+        waves = []
+        nextWaveTime = Date().timeIntervalSinceReferenceDate + 4.5 + pseudoRandom(seedSalt, salt: 313) * 4.5
         bodies = (0..<bodyCount).map { index in
-            let angle = Double(index) / Double(max(bodyCount, 1)) * Double.pi * 2 + Double(seed.uuidString.hashValue % 100) / 300
-            let distance = 90 + Double(index % 2) * 46
+            let salt = seedSalt
+            let baseAngle = Double(index) / Double(max(bodyCount, 1)) * Double.pi * 2
+            let seedAngle = Double(salt % 360) / 360 * Double.pi * 2
+            let angleJitter = (pseudoRandom(index, salt: salt + 17) - 0.5) * 0.62
+            let angle = baseAngle + seedAngle + angleJitter
+            let distance = 82 + pseudoRandom(index, salt: salt + 41) * 86
             let position = CGPoint(
                 x: cos(angle) * distance,
                 y: sin(angle) * distance
             )
             let tangent = CGVector(dx: -sin(angle), dy: cos(angle))
-            let speed = 48 + Double(index) * 7
+            let radial = CGVector(dx: cos(angle), dy: sin(angle))
+            let speed = 40 + pseudoRandom(index, salt: salt + 73) * 52
+            let radialKick = (pseudoRandom(index, salt: salt + 97) - 0.5) * 34
 
             return OrbitalBody(
                 id: index,
                 position: position,
-                velocity: CGVector(dx: tangent.dx * speed, dy: tangent.dy * speed),
+                velocity: CGVector(
+                    dx: tangent.dx * speed + radial.dx * radialKick,
+                    dy: tangent.dy * speed + radial.dy * radialKick
+                ),
                 radius: bodySizes[index],
                 mass: mass(for: bodySizes[index]),
                 color: OrbitalBody.palette[index],
@@ -173,7 +188,7 @@ private struct GalaxyPreview: View {
         pow(radius / 36, 2.15) * 14
     }
 
-    private func stepSimulation(deltaTime: TimeInterval, in size: CGSize) {
+    private func stepSimulation(deltaTime: TimeInterval, time: TimeInterval, in size: CGSize) {
         guard !bodies.isEmpty else { return }
 
         var accelerations = Array(repeating: CGVector.zero, count: bodies.count)
@@ -188,7 +203,11 @@ private struct GalaxyPreview: View {
                 let distance = max(0.001, hypot(dx, dy))
                 let directionX = dx / distance
                 let directionY = dy / distance
-                let comfortableDistance = (bodies[i].radius + bodies[j].radius) * 1.65 + 72
+                let pairKey = bodies[i].id * 37 + bodies[j].id * 53
+                let pairPhase = pseudoRandom(pairKey, salt: seedSalt + 131) * Double.pi * 2
+                let distanceVariation = 0.86 + pseudoRandom(pairKey, salt: seedSalt + 149) * 0.34
+                let breathing = sin(time * (0.18 + pseudoRandom(pairKey, salt: seedSalt + 167) * 0.10) + pairPhase)
+                let comfortableDistance = ((bodies[i].radius + bodies[j].radius) * 1.65 + 72) * distanceVariation + breathing * 16
                 let stretch = distance - comfortableDistance
                 let pull = springStrength * stretch * bodies[j].mass / (bodies[i].mass + bodies[j].mass)
 
@@ -201,17 +220,52 @@ private struct GalaxyPreview: View {
                     accelerations[i].dx -= directionX * push
                     accelerations[i].dy -= directionY * push
                 }
+
+                let turnSign = pseudoRandom(pairKey, salt: seedSalt + 181) > 0.5 ? 1.0 : -1.0
+                let lateralStrength = (2.0 + pseudoRandom(pairKey, salt: seedSalt + 193) * 3.8) * (0.65 + abs(breathing) * 0.55)
+                let lateralFade = min(1.0, max(0.0, distance / comfortableDistance))
+                accelerations[i].dx += -directionY * turnSign * lateralStrength * lateralFade
+                accelerations[i].dy += directionX * turnSign * lateralStrength * lateralFade
             }
 
             let centerDx = -bodies[i].position.x
             let centerDy = -bodies[i].position.y
             let centerDistance = max(1, hypot(centerDx, centerDy))
             let orbitalDirection = CGVector(dx: -centerDy / centerDistance, dy: centerDx / centerDistance)
-            accelerations[i].dx += centerDx * centerStrength + orbitalDirection.dx * 6
-            accelerations[i].dy += centerDy * centerStrength + orbitalDirection.dy * 6
+            let bodyPhase = pseudoRandom(bodies[i].id, salt: seedSalt + 211) * Double.pi * 2
+            let orbitBias = 3.6 + pseudoRandom(bodies[i].id, salt: seedSalt + 229) * 5.2
+            let wander = 2.2 / sqrt(max(1, bodies[i].mass / 10))
+            accelerations[i].dx += centerDx * centerStrength + orbitalDirection.dx * orbitBias
+            accelerations[i].dy += centerDy * centerStrength + orbitalDirection.dy * orbitBias
+            accelerations[i].dx += cos(time * 0.31 + bodyPhase) * wander + cos(time * 0.13 + bodyPhase * 1.7) * wander * 0.7
+            accelerations[i].dy += sin(time * 0.27 + bodyPhase * 1.3) * wander + sin(time * 0.11 + bodyPhase * 0.8) * wander * 0.7
         }
 
         for index in bodies.indices {
+            for wave in waves {
+                let age = time - wave.startTime
+                guard age >= 0, age <= wave.duration else { continue }
+
+                let dx = bodies[index].position.x - wave.origin.x
+                let dy = bodies[index].position.y - wave.origin.y
+                let distance = max(1, hypot(dx, dy))
+                let waveRadius = wave.speed * age
+                let distanceFromFront = abs(distance - waveRadius)
+                let bandWidth = wave.bandWidth
+                guard distanceFromFront < bandWidth else { continue }
+
+                let directionX = dx / distance
+                let directionY = dy / distance
+                let frontFalloff = 1 - distanceFromFront / bandWidth
+                let lifeFalloff = pow(max(0, 1 - age / wave.duration), 0.65)
+                let ripple = sin((bandWidth - distanceFromFront) / bandWidth * Double.pi)
+                let impulse = wave.strength * frontFalloff * lifeFalloff * ripple / sqrt(max(1, bodies[index].mass / 10))
+                let twist = wave.twist * frontFalloff * lifeFalloff
+
+                bodies[index].velocity.dx += (directionX * impulse - directionY * twist) * deltaTime
+                bodies[index].velocity.dy += (directionY * impulse + directionX * twist) * deltaTime
+            }
+
             bodies[index].velocity.dx += accelerations[index].dx * deltaTime
             bodies[index].velocity.dy += accelerations[index].dy * deltaTime
 
@@ -249,6 +303,33 @@ private struct GalaxyPreview: View {
                 bodies[index].trail.removeFirst()
             }
         }
+    }
+
+    private func updateGravityWaves(time: TimeInterval) {
+        waves.removeAll { time - $0.startTime > $0.duration }
+
+        guard time >= nextWaveTime else { return }
+
+        let waveIndex = Int(time.rounded()) + seedSalt + waves.count * 17
+        let angle = pseudoRandom(waveIndex, salt: seedSalt + 331) * Double.pi * 2
+        let distance = 50 + pseudoRandom(waveIndex, salt: seedSalt + 347) * 230
+        let origin = CGPoint(x: cos(angle) * distance, y: sin(angle) * distance)
+        let strength = 520 + pseudoRandom(waveIndex, salt: seedSalt + 359) * 420
+        let twist = (pseudoRandom(waveIndex, salt: seedSalt + 373) - 0.5) * 260
+
+        waves.append(
+            GravityWave(
+                origin: origin,
+                startTime: time,
+                duration: 4.8,
+                speed: 92 + pseudoRandom(waveIndex, salt: seedSalt + 389) * 42,
+                bandWidth: 78,
+                strength: strength,
+                twist: twist
+            )
+        )
+
+        nextWaveTime = time + 7.5 + pseudoRandom(waveIndex, salt: seedSalt + 401) * 7.0
     }
 
     private func resolveOverlaps() {
@@ -409,6 +490,38 @@ private struct GalaxyPreview: View {
         }
     }
 
+    private func drawWaves(_ waves: [GravityWave], time: TimeInterval, view: GalaxyCamera, size: CGSize, in context: inout GraphicsContext) {
+        for wave in waves {
+            let age = time - wave.startTime
+            guard age >= 0, age <= wave.duration else { continue }
+
+            let progress = age / wave.duration
+            let position = screenPoint(wave.origin, view: view, size: size)
+            let radius = wave.speed * age * view.scale
+            let band = max(10, wave.bandWidth * view.scale)
+            let opacity = 0.24 * pow(max(0, 1 - progress), 0.7)
+            let rect = CGRect(
+                x: position.x - radius,
+                y: position.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            )
+
+            var waveContext = context
+            waveContext.blendMode = .plusLighter
+            waveContext.stroke(
+                Path(ellipseIn: rect),
+                with: .color(Color(red: 0.75, green: 0.88, blue: 1.00).opacity(opacity)),
+                style: StrokeStyle(lineWidth: band * 0.18, lineCap: .round)
+            )
+            waveContext.stroke(
+                Path(ellipseIn: rect.insetBy(dx: -band * 0.38, dy: -band * 0.38)),
+                with: .color(Color(red: 0.85, green: 0.62, blue: 1.00).opacity(opacity * 0.45)),
+                style: StrokeStyle(lineWidth: max(1, band * 0.08), lineCap: .round)
+            )
+        }
+    }
+
     private func drawBodies(_ bodies: [OrbitalBody], view: GalaxyCamera, size: CGSize, in context: inout GraphicsContext) {
         for body in bodies {
             let position = screenPoint(body.position, view: view, size: size)
@@ -480,6 +593,12 @@ private struct GalaxyPreview: View {
         let raw = sin(Double(value * 97 + salt * 31)) * 10000
         return raw - floor(raw)
     }
+
+    private var seedSalt: Int {
+        seed.uuidString.unicodeScalars.reduce(0) { partial, scalar in
+            (partial * 31 + Int(scalar.value)) % 10_000
+        }
+    }
 }
 
 private struct OrbitalBody: Identifiable {
@@ -524,6 +643,16 @@ private struct OrbitalPalette {
 private struct GalaxyCamera {
     var center: CGPoint
     var scale: Double
+}
+
+private struct GravityWave {
+    let origin: CGPoint
+    let startTime: TimeInterval
+    let duration: TimeInterval
+    let speed: Double
+    let bandWidth: Double
+    let strength: Double
+    let twist: Double
 }
 
 #Preview {
