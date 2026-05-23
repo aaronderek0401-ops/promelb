@@ -93,6 +93,7 @@ private struct GalaxyPreview: View {
 
     @State private var bodies: [OrbitalBody] = []
     @State private var lastUpdate = Date()
+    @State private var camera = GalaxyCamera(center: .zero, scale: 1)
 
     var body: some View {
         TimelineView(.animation) { timeline in
@@ -101,8 +102,9 @@ private struct GalaxyPreview: View {
                 drawBackground(in: rect, context: context)
 
                 let updatedBodies = updateBodies(for: timeline.date, in: size)
-                drawOrbits(for: updatedBodies, in: &context)
-                drawBodies(updatedBodies, in: &context)
+                let view = cameraView(for: updatedBodies, in: size)
+                drawOrbits(for: updatedBodies, view: view, size: size, in: &context)
+                drawBodies(updatedBodies, view: view, size: size, in: &context)
             }
         }
         .onAppear {
@@ -136,16 +138,16 @@ private struct GalaxyPreview: View {
 
     private func resetBodies(in size: CGSize) {
         lastUpdate = .now
+        camera = GalaxyCamera(center: .zero, scale: 1)
         bodies = (0..<bodyCount).map { index in
             let angle = Double(index) / Double(max(bodyCount, 1)) * Double.pi * 2 + Double(seed.uuidString.hashValue % 100) / 300
-            let distance = 70 + Double(index % 2) * 36
-            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let distance = 90 + Double(index % 2) * 46
             let position = CGPoint(
-                x: center.x + cos(angle) * distance,
-                y: center.y + sin(angle) * distance
+                x: cos(angle) * distance,
+                y: sin(angle) * distance
             )
             let tangent = CGVector(dx: -sin(angle), dy: cos(angle))
-            let speed = 42 + Double(index) * 6
+            let speed = 48 + Double(index) * 7
 
             return OrbitalBody(
                 id: index,
@@ -174,38 +176,39 @@ private struct GalaxyPreview: View {
     private func stepSimulation(deltaTime: TimeInterval, in size: CGSize) {
         guard !bodies.isEmpty else { return }
 
-        let center = CGPoint(x: size.width / 2, y: size.height / 2)
         var accelerations = Array(repeating: CGVector.zero, count: bodies.count)
-        let gravity = 360.0
-        let softening = 2600.0
-        let closeRepulsion = 520.0
+        let springStrength = 1.05
+        let repulsionStrength = 980.0
+        let centerStrength = 0.018
 
         for i in bodies.indices {
             for j in bodies.indices where i != j {
                 let dx = bodies[j].position.x - bodies[i].position.x
                 let dy = bodies[j].position.y - bodies[i].position.y
-                let distanceSquared = dx * dx + dy * dy + softening
-                let distance = sqrt(distanceSquared)
-                let minDistance = (bodies[i].radius + bodies[j].radius) * 0.76
-                let force = gravity * bodies[j].mass / distanceSquared
+                let distance = max(0.001, hypot(dx, dy))
+                let directionX = dx / distance
+                let directionY = dy / distance
+                let comfortableDistance = (bodies[i].radius + bodies[j].radius) * 1.65 + 72
+                let stretch = distance - comfortableDistance
+                let pull = springStrength * stretch * bodies[j].mass / (bodies[i].mass + bodies[j].mass)
 
-                accelerations[i].dx += dx / distance * force
-                accelerations[i].dy += dy / distance * force
+                accelerations[i].dx += directionX * pull
+                accelerations[i].dy += directionY * pull
 
-                if distance < minDistance {
-                    let overlapRatio = (minDistance - distance) / minDistance
-                    let push = closeRepulsion * overlapRatio * overlapRatio
-                    accelerations[i].dx -= dx / distance * push
-                    accelerations[i].dy -= dy / distance * push
+                if stretch < 0 {
+                    let compression = -stretch / comfortableDistance
+                    let push = repulsionStrength * compression * compression
+                    accelerations[i].dx -= directionX * push
+                    accelerations[i].dy -= directionY * push
                 }
             }
 
-            let centerDx = center.x - bodies[i].position.x
-            let centerDy = center.y - bodies[i].position.y
+            let centerDx = -bodies[i].position.x
+            let centerDy = -bodies[i].position.y
             let centerDistance = max(1, hypot(centerDx, centerDy))
             let orbitalDirection = CGVector(dx: -centerDy / centerDistance, dy: centerDx / centerDistance)
-            accelerations[i].dx += centerDx * 0.020 + orbitalDirection.dx * 5
-            accelerations[i].dy += centerDy * 0.020 + orbitalDirection.dy * 5
+            accelerations[i].dx += centerDx * centerStrength + orbitalDirection.dx * 6
+            accelerations[i].dy += centerDy * centerStrength + orbitalDirection.dy * 6
         }
 
         for index in bodies.indices {
@@ -215,11 +218,11 @@ private struct GalaxyPreview: View {
             bodies[index].velocity.dx *= 0.9995
             bodies[index].velocity.dy *= 0.9995
 
-            let minSpeed = 34.0
+            let minSpeed = 42.0
             let currentSpeed = hypot(bodies[index].velocity.dx, bodies[index].velocity.dy)
             if currentSpeed < minSpeed {
-                let dx = bodies[index].position.x - center.x
-                let dy = bodies[index].position.y - center.y
+                let dx = bodies[index].position.x
+                let dy = bodies[index].position.y
                 let distance = max(1, hypot(dx, dy))
                 bodies[index].velocity.dx += -dy / distance * 24 * deltaTime
                 bodies[index].velocity.dy += dx / distance * 24 * deltaTime
@@ -235,10 +238,10 @@ private struct GalaxyPreview: View {
             bodies[index].position.x += bodies[index].velocity.dx * deltaTime
             bodies[index].position.y += bodies[index].velocity.dy * deltaTime
 
-            keepBody(index, inside: size)
+            keepBodyNearSystem(index)
         }
 
-        resolveOverlaps(in: size)
+        resolveOverlaps()
 
         for index in bodies.indices {
             bodies[index].trail.append(bodies[index].position)
@@ -248,7 +251,7 @@ private struct GalaxyPreview: View {
         }
     }
 
-    private func resolveOverlaps(in size: CGSize) {
+    private func resolveOverlaps() {
         guard bodies.count > 1 else { return }
 
         for i in bodies.indices {
@@ -263,7 +266,7 @@ private struct GalaxyPreview: View {
                     distance = 1
                 }
 
-                let minDistance = (bodies[i].radius + bodies[j].radius) * 0.82
+                let minDistance = (bodies[i].radius + bodies[j].radius) * 1.02
                 guard distance < minDistance else { continue }
 
                 let normalX = dx / distance
@@ -299,35 +302,69 @@ private struct GalaxyPreview: View {
                     bodies[j].velocity.dy += tangentY * swirl * iShare
                 }
 
-                keepBody(i, inside: size)
-                keepBody(j, inside: size)
+                keepBodyNearSystem(i)
+                keepBodyNearSystem(j)
             }
         }
     }
 
-    private func keepBody(_ index: Int, inside size: CGSize) {
-        let padding = bodies[index].radius * 0.72
-        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+    private func keepBodyNearSystem(_ index: Int) {
+        let distance = hypot(bodies[index].position.x, bodies[index].position.y)
+        let limit = 680.0
+        guard distance > limit else { return }
 
-        if bodies[index].position.x < padding {
-            bodies[index].position.x = padding
-            bodies[index].velocity.dx = abs(bodies[index].velocity.dx) * 0.22
-            bodies[index].velocity.dy += (center.y - bodies[index].position.y) * 0.025
-        } else if bodies[index].position.x > size.width - padding {
-            bodies[index].position.x = size.width - padding
-            bodies[index].velocity.dx = -abs(bodies[index].velocity.dx) * 0.22
-            bodies[index].velocity.dy += (center.y - bodies[index].position.y) * 0.025
+        let normalX = bodies[index].position.x / distance
+        let normalY = bodies[index].position.y / distance
+        bodies[index].position.x = normalX * limit
+        bodies[index].position.y = normalY * limit
+        let outwardVelocity = bodies[index].velocity.dx * normalX + bodies[index].velocity.dy * normalY
+        if outwardVelocity > 0 {
+            bodies[index].velocity.dx -= normalX * outwardVelocity * 1.25
+            bodies[index].velocity.dy -= normalY * outwardVelocity * 1.25
+        }
+    }
+
+    private func cameraView(for bodies: [OrbitalBody], in size: CGSize) -> GalaxyCamera {
+        guard let first = bodies.first else {
+            return GalaxyCamera(center: .zero, scale: 1)
         }
 
-        if bodies[index].position.y < padding {
-            bodies[index].position.y = padding
-            bodies[index].velocity.dy = abs(bodies[index].velocity.dy) * 0.22
-            bodies[index].velocity.dx += (center.x - bodies[index].position.x) * 0.025
-        } else if bodies[index].position.y > size.height - padding {
-            bodies[index].position.y = size.height - padding
-            bodies[index].velocity.dy = -abs(bodies[index].velocity.dy) * 0.22
-            bodies[index].velocity.dx += (center.x - bodies[index].position.x) * 0.025
+        var minX = first.position.x - first.radius
+        var maxX = first.position.x + first.radius
+        var minY = first.position.y - first.radius
+        var maxY = first.position.y + first.radius
+
+        for body in bodies {
+            minX = min(minX, body.position.x - body.radius * 1.7)
+            maxX = max(maxX, body.position.x + body.radius * 1.7)
+            minY = min(minY, body.position.y - body.radius * 1.7)
+            maxY = max(maxY, body.position.y + body.radius * 1.7)
         }
+
+        let width = max(220, maxX - minX)
+        let height = max(220, maxY - minY)
+        let targetCenter = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
+        let targetScale = min(size.width * 0.72 / width, size.height * 0.72 / height, 1.25)
+        let smoothed = GalaxyCamera(
+            center: CGPoint(
+                x: camera.center.x * 0.92 + targetCenter.x * 0.08,
+                y: camera.center.y * 0.92 + targetCenter.y * 0.08
+            ),
+            scale: camera.scale * 0.90 + targetScale * 0.10
+        )
+
+        DispatchQueue.main.async {
+            camera = smoothed
+        }
+
+        return smoothed
+    }
+
+    private func screenPoint(_ point: CGPoint, view: GalaxyCamera, size: CGSize) -> CGPoint {
+        CGPoint(
+            x: size.width / 2 + (point.x - view.center.x) * view.scale,
+            y: size.height / 2 + (point.y - view.center.y) * view.scale
+        )
     }
 
     private func drawBackground(in rect: CGRect, context: GraphicsContext) {
@@ -354,31 +391,33 @@ private struct GalaxyPreview: View {
         }
     }
 
-    private func drawOrbits(for bodies: [OrbitalBody], in context: inout GraphicsContext) {
+    private func drawOrbits(for bodies: [OrbitalBody], view: GalaxyCamera, size: CGSize, in context: inout GraphicsContext) {
         for body in bodies {
             guard body.trail.count > 2 else { continue }
 
             var path = Path()
-            path.move(to: body.trail[0])
+            path.move(to: screenPoint(body.trail[0], view: view, size: size))
             for point in body.trail.dropFirst() {
-                path.addLine(to: point)
+                path.addLine(to: screenPoint(point, view: view, size: size))
             }
 
             context.stroke(
                 path,
                 with: .color(body.color.base.opacity(0.22)),
-                style: StrokeStyle(lineWidth: max(1.0, body.radius / 24), lineCap: .round, lineJoin: .round)
+                style: StrokeStyle(lineWidth: max(0.8, body.radius * view.scale / 24), lineCap: .round, lineJoin: .round)
             )
         }
     }
 
-    private func drawBodies(_ bodies: [OrbitalBody], in context: inout GraphicsContext) {
+    private func drawBodies(_ bodies: [OrbitalBody], view: GalaxyCamera, size: CGSize, in context: inout GraphicsContext) {
         for body in bodies {
+            let position = screenPoint(body.position, view: view, size: size)
+            let radius = body.radius * view.scale
             let glowRect = CGRect(
-                x: body.position.x - body.radius * 1.6,
-                y: body.position.y - body.radius * 1.6,
-                width: body.radius * 3.2,
-                height: body.radius * 3.2
+                x: position.x - radius * 1.6,
+                y: position.y - radius * 1.6,
+                width: radius * 3.2,
+                height: radius * 3.2
             )
             context.fill(
                 Path(ellipseIn: glowRect),
@@ -388,17 +427,17 @@ private struct GalaxyPreview: View {
                         body.color.base.opacity(0.10),
                         .clear
                     ]),
-                    center: body.position,
-                    startRadius: body.radius * 0.15,
-                    endRadius: body.radius * 1.65
+                    center: position,
+                    startRadius: radius * 0.15,
+                    endRadius: radius * 1.65
                 )
             )
 
             let bodyRect = CGRect(
-                x: body.position.x - body.radius,
-                y: body.position.y - body.radius,
-                width: body.radius * 2,
-                height: body.radius * 2
+                x: position.x - radius,
+                y: position.y - radius,
+                width: radius * 2,
+                height: radius * 2
             )
             context.fill(
                 Path(ellipseIn: bodyRect),
@@ -410,28 +449,28 @@ private struct GalaxyPreview: View {
                         body.color.shadow.opacity(0.92)
                     ]),
                     center: CGPoint(
-                        x: body.position.x - body.radius * 0.32,
-                        y: body.position.y - body.radius * 0.38
+                        x: position.x - radius * 0.32,
+                        y: position.y - radius * 0.38
                     ),
-                    startRadius: body.radius * 0.05,
-                    endRadius: body.radius * 1.25
+                    startRadius: radius * 0.05,
+                    endRadius: radius * 1.25
                 )
             )
 
             var rimContext = context
             rimContext.blendMode = .plusLighter
             rimContext.stroke(
-                Path(ellipseIn: bodyRect.insetBy(dx: body.radius * 0.08, dy: body.radius * 0.08)),
+                Path(ellipseIn: bodyRect.insetBy(dx: radius * 0.08, dy: radius * 0.08)),
                 with: .color(.white.opacity(0.28)),
-                lineWidth: max(1, body.radius / 18)
+                lineWidth: max(1, radius / 18)
             )
 
-            if body.radius > 58 {
-                let ringRect = bodyRect.insetBy(dx: -body.radius * 0.28, dy: body.radius * 0.18)
+            if radius > 58 {
+                let ringRect = bodyRect.insetBy(dx: -radius * 0.28, dy: radius * 0.18)
                 context.stroke(
                     Path(ellipseIn: ringRect),
                     with: .color(body.color.highlight.opacity(0.34)),
-                    style: StrokeStyle(lineWidth: max(1.3, body.radius / 26))
+                    style: StrokeStyle(lineWidth: max(1.3, radius / 26))
                 )
             }
         }
@@ -480,6 +519,11 @@ private struct OrbitalPalette {
     let base: Color
     let highlight: Color
     let shadow: Color
+}
+
+private struct GalaxyCamera {
+    var center: CGPoint
+    var scale: Double
 }
 
 #Preview {
