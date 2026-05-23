@@ -1,0 +1,17 @@
+# Xcode
+DerivedData/
+.DerivedData/
+build/
+*.xcuserstate
+*.xcscmblueprint
+
+# Swift local caches
+.swift-cache/
+.build/
+
+# macOS
+.DS_Store
+
+# User-specific Xcode settings
+xcuserdata/
+*.xccheckout
