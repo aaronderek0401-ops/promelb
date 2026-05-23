@@ -70,7 +70,7 @@ struct ContentView: View {
                         }
 
                         Slider(value: $bodySizes[index], in: 28...86, step: 1)
-                            .tint(OrbitalBody.palette[index].base)
+                            .tint(OrbitalBody.palette[index].highlight)
                     }
                 }
 
@@ -310,7 +310,7 @@ private struct GalaxyPreview: View {
 
         for index in bodies.indices {
             bodies[index].trail.append(bodies[index].position)
-            if bodies[index].trail.count > 90 {
+            if bodies[index].trail.count > 150 {
                 bodies[index].trail.removeFirst()
             }
         }
@@ -563,17 +563,73 @@ private struct GalaxyPreview: View {
         for body in bodies {
             guard body.trail.count > 2 else { continue }
 
-            var path = Path()
-            path.move(to: screenPoint(body.trail[0], view: view, size: size))
-            for point in body.trail.dropFirst() {
-                path.addLine(to: screenPoint(point, view: view, size: size))
-            }
+            var dustContext = context
+            dustContext.blendMode = .plusLighter
 
-            context.stroke(
-                path,
-                with: .color(body.color.base.opacity(0.22)),
-                style: StrokeStyle(lineWidth: max(0.8, body.radius * view.scale / 24), lineCap: .round, lineJoin: .round)
-            )
+            for index in stride(from: 1, to: body.trail.count, by: 2) {
+                let progress = Double(index) / Double(max(1, body.trail.count - 1))
+                let basePoint = screenPoint(body.trail[index], view: view, size: size)
+                let previous = screenPoint(body.trail[index - 1], view: view, size: size)
+                let tangentX = basePoint.x - previous.x
+                let tangentY = basePoint.y - previous.y
+                let tangentLength = max(0.001, hypot(tangentX, tangentY))
+                let normalX = -tangentY / tangentLength
+                let normalY = tangentX / tangentLength
+                let rootWeight = pow(progress, 4.0)
+                let tailWidth = body.radius * view.scale * (0.020 + pow(progress, 2.0) * 0.150 + rootWeight * 0.130)
+                let sparkleCount = progress > 0.86 ? 8 : (progress > 0.72 ? 5 : (progress > 0.42 ? 3 : 2))
+
+                for sparkle in 0..<sparkleCount {
+                    let key = body.id * 911 + index * 17 + sparkle
+                    let side = pseudoRandom(key, salt: 1231) - 0.5
+                    let along = (pseudoRandom(key, salt: 1249) - 0.5) * body.radius * view.scale * (0.040 + rootWeight * 0.130)
+                    let spread = side * tailWidth * (0.65 + pseudoRandom(key, salt: 1259) * 1.10)
+                    let point = CGPoint(
+                        x: basePoint.x + normalX * spread + tangentX / tangentLength * along,
+                        y: basePoint.y + normalY * spread + tangentY / tangentLength * along
+                    )
+                    let dustRadius = max(0.32, body.radius * view.scale * (0.003 + pseudoRandom(key, salt: 1277) * 0.012) * (0.35 + progress * 1.45 + rootWeight * 0.80))
+                    let dustRect = CGRect(
+                        x: point.x - dustRadius / 2,
+                        y: point.y - dustRadius / 2,
+                        width: dustRadius,
+                        height: dustRadius
+                    )
+                    let opacity = pow(progress, 2.25) * (0.07 + pseudoRandom(key, salt: 1291) * 0.20)
+                    let whiteOpacity = rootWeight * (0.08 + pseudoRandom(key, salt: 1303) * 0.16)
+                    dustContext.fill(
+                        Path(ellipseIn: dustRect),
+                        with: .color(body.color.highlight.opacity(opacity))
+                    )
+                    dustContext.fill(
+                        Path(ellipseIn: dustRect.insetBy(dx: dustRadius * 0.24, dy: dustRadius * 0.24)),
+                        with: .color(.white.opacity(whiteOpacity))
+                    )
+                }
+
+                if index > body.trail.count - 36 {
+                    let glowRadius = max(1.1, body.radius * view.scale * (0.012 + progress * 0.026))
+                    let glowRect = CGRect(
+                        x: basePoint.x - glowRadius,
+                        y: basePoint.y - glowRadius,
+                        width: glowRadius * 2,
+                        height: glowRadius * 2
+                    )
+                    dustContext.fill(
+                        Path(ellipseIn: glowRect),
+                        with: .radialGradient(
+                            Gradient(colors: [
+                                .white.opacity(0.050 * rootWeight),
+                                body.color.highlight.opacity(0.060 * pow(progress, 1.8)),
+                                .clear
+                            ]),
+                            center: basePoint,
+                            startRadius: 0,
+                            endRadius: glowRadius
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -613,66 +669,80 @@ private struct GalaxyPreview: View {
         for body in bodies {
             let position = screenPoint(body.position, view: view, size: size)
             let radius = body.radius * view.scale
-            let glowRect = CGRect(
-                x: position.x - radius * 1.6,
-                y: position.y - radius * 1.6,
-                width: radius * 3.2,
-                height: radius * 3.2
+            let speed = max(0.001, hypot(body.velocity.dx, body.velocity.dy))
+            let trailDirectionX = -body.velocity.dx / speed
+            let trailDirectionY = -body.velocity.dy / speed
+            let sideDirectionX = -trailDirectionY
+            let sideDirectionY = trailDirectionX
+
+            var lightContext = context
+            lightContext.blendMode = .plusLighter
+
+            for dustIndex in 0..<70 {
+                let angle = pseudoRandom(body.id * 97 + dustIndex, salt: 811) * Double.pi * 2
+                let distanceNoise = pow(pseudoRandom(body.id * 131 + dustIndex, salt: 829), 2.25)
+                let localDistance = radius * (0.05 + distanceNoise * 1.15)
+                let tailPull = pow(pseudoRandom(body.id * 149 + dustIndex, salt: 839), 2.0) * radius * 0.58
+                let sideSpread = (pseudoRandom(body.id * 173 + dustIndex, salt: 887) - 0.5) * radius * (0.16 + distanceNoise * 0.52)
+                let dustSize = max(0.30, radius * (0.004 + pseudoRandom(body.id * 151 + dustIndex, salt: 853) * 0.015) * (1.25 - distanceNoise * 0.55))
+                let dustCenter = CGPoint(
+                    x: position.x + cos(angle) * localDistance + trailDirectionX * tailPull + sideDirectionX * sideSpread,
+                    y: position.y + sin(angle) * localDistance + trailDirectionY * tailPull + sideDirectionY * sideSpread
+                )
+                let dustRect = CGRect(
+                    x: dustCenter.x - dustSize / 2,
+                    y: dustCenter.y - dustSize / 2,
+                    width: dustSize,
+                    height: dustSize
+                )
+                let dustOpacity = (1 - distanceNoise) * (0.05 + pseudoRandom(dustIndex, salt: 877) * 0.22)
+                lightContext.fill(
+                    Path(ellipseIn: dustRect),
+                    with: .color(body.color.highlight.opacity(dustOpacity))
+                )
+            }
+
+            let coreRadius = max(2.2, min(radius * 0.18, 8.0))
+            let coreGlowRadius = coreRadius * 5.2
+            let coreGlowRect = CGRect(
+                x: position.x - coreGlowRadius,
+                y: position.y - coreGlowRadius,
+                width: coreGlowRadius * 2,
+                height: coreGlowRadius * 2
             )
-            context.fill(
-                Path(ellipseIn: glowRect),
+            lightContext.fill(
+                Path(ellipseIn: coreGlowRect),
                 with: .radialGradient(
                     Gradient(colors: [
-                        body.color.base.opacity(0.35),
-                        body.color.base.opacity(0.10),
+                        .white.opacity(0.20),
+                        body.color.highlight.opacity(0.10),
                         .clear
                     ]),
                     center: position,
-                    startRadius: radius * 0.15,
-                    endRadius: radius * 1.65
+                    startRadius: 0,
+                    endRadius: coreGlowRadius
                 )
             )
 
-            let bodyRect = CGRect(
-                x: position.x - radius,
-                y: position.y - radius,
-                width: radius * 2,
-                height: radius * 2
+            let coreRect = CGRect(
+                x: position.x - coreRadius,
+                y: position.y - coreRadius,
+                width: coreRadius * 2,
+                height: coreRadius * 2
             )
-            context.fill(
-                Path(ellipseIn: bodyRect),
+            lightContext.fill(
+                Path(ellipseIn: coreRect),
                 with: .radialGradient(
                     Gradient(colors: [
-                        .white.opacity(0.95),
-                        body.color.highlight.opacity(0.92),
-                        body.color.base.opacity(0.86),
-                        body.color.shadow.opacity(0.92)
+                        .white.opacity(0.98),
+                        body.color.highlight.opacity(0.82),
+                        body.color.base.opacity(0.18)
                     ]),
-                    center: CGPoint(
-                        x: position.x - radius * 0.32,
-                        y: position.y - radius * 0.38
-                    ),
-                    startRadius: radius * 0.05,
-                    endRadius: radius * 1.25
+                    center: position,
+                    startRadius: 0,
+                    endRadius: coreRadius
                 )
             )
-
-            var rimContext = context
-            rimContext.blendMode = .plusLighter
-            rimContext.stroke(
-                Path(ellipseIn: bodyRect.insetBy(dx: radius * 0.08, dy: radius * 0.08)),
-                with: .color(.white.opacity(0.28)),
-                lineWidth: max(1, radius / 18)
-            )
-
-            if radius > 58 {
-                let ringRect = bodyRect.insetBy(dx: -radius * 0.28, dy: radius * 0.18)
-                context.stroke(
-                    Path(ellipseIn: ringRect),
-                    with: .color(body.color.highlight.opacity(0.34)),
-                    style: StrokeStyle(lineWidth: max(1.3, radius / 26))
-                )
-            }
         }
     }
 
@@ -699,24 +769,24 @@ private struct OrbitalBody: Identifiable {
 
     static let palette = [
         OrbitalPalette(
-            base: Color(red: 0.35, green: 0.70, blue: 1.00),
-            highlight: Color(red: 0.78, green: 0.94, blue: 1.00),
-            shadow: Color(red: 0.07, green: 0.19, blue: 0.45)
+            base: Color(red: 0.42, green: 0.67, blue: 0.86),
+            highlight: Color(red: 0.82, green: 0.94, blue: 1.00),
+            shadow: Color(red: 0.030, green: 0.070, blue: 0.130)
         ),
         OrbitalPalette(
-            base: Color(red: 0.92, green: 0.54, blue: 1.00),
-            highlight: Color(red: 1.00, green: 0.83, blue: 1.00),
-            shadow: Color(red: 0.34, green: 0.08, blue: 0.50)
+            base: Color(red: 0.62, green: 0.58, blue: 0.78),
+            highlight: Color(red: 0.92, green: 0.87, blue: 1.00),
+            shadow: Color(red: 0.070, green: 0.045, blue: 0.140)
         ),
         OrbitalPalette(
-            base: Color(red: 0.38, green: 0.95, blue: 0.66),
-            highlight: Color(red: 0.78, green: 1.00, blue: 0.83),
-            shadow: Color(red: 0.05, green: 0.35, blue: 0.20)
+            base: Color(red: 0.50, green: 0.74, blue: 0.66),
+            highlight: Color(red: 0.84, green: 1.00, blue: 0.92),
+            shadow: Color(red: 0.030, green: 0.110, blue: 0.090)
         ),
         OrbitalPalette(
-            base: Color(red: 1.00, green: 0.64, blue: 0.28),
-            highlight: Color(red: 1.00, green: 0.88, blue: 0.55),
-            shadow: Color(red: 0.52, green: 0.16, blue: 0.04)
+            base: Color(red: 0.86, green: 0.68, blue: 0.42),
+            highlight: Color(red: 1.00, green: 0.91, blue: 0.68),
+            shadow: Color(red: 0.150, green: 0.075, blue: 0.025)
         )
     ]
 }
